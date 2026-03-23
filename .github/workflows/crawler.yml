@@ -6,6 +6,15 @@ on:
     - cron: "0 1 * * *"
 
   workflow_dispatch:
+    inputs:
+      mode:
+        description: "运行模式"
+        required: false
+        default: "normal"
+        type: choice
+        options:
+          - normal
+          - notification_test
 
 concurrency:
   group: crawler-${{ github.ref_name }}
@@ -46,7 +55,7 @@ jobs:
 
       - name: Set up Python
         if: success()
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.10"
           cache: "pip"
@@ -99,4 +108,9 @@ jobs:
           S3_ENDPOINT_URL: ${{ secrets.S3_ENDPOINT_URL }}
           S3_REGION: ${{ secrets.S3_REGION }}
           GITHUB_ACTIONS: true
-        run: python -m trendradar
+        run: |
+          if [ "${{ github.event.inputs.mode }}" = "notification_test" ]; then
+            python -m trendradar --test-notification
+          else
+            python -m trendradar
+          fi
