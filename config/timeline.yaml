@@ -463,11 +463,11 @@ custom:
       name: "早间汇总"
       start: "09:00"
       end: "10:59"
-      analyze: false
+      analyze: true
       push: true
       report_mode: "rolling_24h"
       once:
-        analyze: false
+        analyze: true
         push: true
 
 
