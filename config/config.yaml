@@ -117,6 +117,10 @@ rss:
       name: "Hacker News"
       url: "https://hnrss.org/frontpage"
 
+    - id: "github-changelog"
+      name: "GitHub Changelog"
+      url: "https://github.blog/changelog/feed/"
+
     - id: "ruanyifeng"
       name: "阮一峰的网络日志"
       url: "http://www.ruanyifeng.com/blog/atom.xml"

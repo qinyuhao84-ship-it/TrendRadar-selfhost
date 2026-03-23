@@ -23,6 +23,7 @@ class AIAnalysisResult:
     signals: str = ""                    # 异动与弱信号
     rss_insights: str = ""               # RSS 深度洞察
     outlook_strategy: str = ""           # 研判与策略建议
+    developer_briefing: str = ""         # 给个人开发者的工具与用法提示
     standalone_summaries: Dict[str, str] = field(default_factory=dict)  # 独立展示区概括 {源ID: 概括}
 
     # 基础元数据
@@ -630,6 +631,7 @@ class AIAnalyzer:
             result.signals = data.get("signals", "")
             result.rss_insights = data.get("rss_insights", "")
             result.outlook_strategy = data.get("outlook_strategy", "")
+            result.developer_briefing = data.get("developer_briefing", "")
 
             # 解析独立展示区概括
             summaries = data.get("standalone_summaries", {})
