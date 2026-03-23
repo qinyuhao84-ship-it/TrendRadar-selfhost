@@ -396,7 +396,7 @@ presets:
 
 custom:
   name: "自定义"
-  description: "每天 09:00-10:59 推送一次全量汇总。"
+  description: "每小时采集一次，09:00-10:59 只推送一次过去24小时必看热点。"
 
   # ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
   # 默认配置
@@ -413,10 +413,11 @@ custom:
                                    #   current       → 强制当前榜单
                                    #   incremental   → 强制增量模式
     push: false                    # 是否发送推送通知
-    report_mode: "daily"           # 报告模式:
+    report_mode: "current"         # 报告模式:
                                    #   daily       → 当日所有新闻的汇总
                                    #   current     → 当前在榜的新闻
                                    #   incremental → 只推送新增内容
+                                   #   rolling_24h → 过去24小时滚动汇总
 
                                    
     frequency_file: "all_hotspots.txt"
@@ -464,7 +465,7 @@ custom:
       end: "10:59"
       analyze: false
       push: true
-      report_mode: "daily"
+      report_mode: "rolling_24h"
       once:
         analyze: false
         push: true

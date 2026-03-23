@@ -13,10 +13,11 @@ import os
 import re
 import sys
 import webbrowser
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from typing import Dict, List, Tuple, Optional
 
+import pytz
 import requests
 
 from trendradar.context import AppContext
@@ -210,6 +211,12 @@ class NewsAnalyzer:
             "mode_name": "全天汇总模式",
             "description": "全天汇总模式（所有匹配新闻 + 新增新闻区域 + 按时推送）",
             "report_type": "全天汇总",
+            "should_send_notification": True,
+        },
+        "rolling_24h": {
+            "mode_name": "过去24小时模式",
+            "description": "过去24小时模式（滚动24小时热点汇总，只推必须知道的热点）",
+            "report_type": "过去24小时汇总",
             "should_send_notification": True,
         },
     }
@@ -620,6 +627,260 @@ class NewsAnalyzer:
         except Exception as e:
             print(f"数据加载失败: {e}")
             return None
+
+    def _parse_local_datetime(self, date_str: str, time_str: str) -> Optional[datetime]:
+        """将日期和时间解析为配置时区的 datetime。"""
+        if not date_str or not time_str:
+            return None
+
+        tz = pytz.timezone(self.ctx.timezone)
+        normalized = str(time_str).strip()
+        if not normalized:
+            return None
+
+        try:
+            if "T" in normalized or len(normalized) >= 16:
+                dt = datetime.fromisoformat(normalized.replace("Z", "+00:00"))
+                if dt.tzinfo is None:
+                    return tz.localize(dt)
+                return dt.astimezone(tz)
+        except Exception:
+            pass
+
+        for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H-%M"):
+            try:
+                return tz.localize(datetime.strptime(f"{date_str} {normalized}", fmt))
+            except ValueError:
+                continue
+
+        return None
+
+    @staticmethod
+    def _format_window_time(dt: datetime) -> str:
+        """24小时窗口展示统一使用月-日 时:分。"""
+        return dt.strftime("%m-%d %H:%M")
+
+    def _load_rolling_analysis_data(
+        self,
+        quiet: bool = False,
+        hours: int = 24,
+    ) -> Optional[Tuple[Dict, Dict, Dict, Dict, List, List, List]]:
+        """加载过去 N 小时的热榜数据，跨今天和昨天聚合。"""
+        try:
+            now = self.ctx.get_time()
+            cutoff = now - timedelta(hours=hours)
+            current_platform_ids = self.ctx.platform_ids
+            window_dates = sorted({cutoff.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d")})
+            backend = self.storage_manager.get_backend()
+
+            merged_items: Dict[str, Dict[str, Dict]] = {}
+            id_to_name: Dict[str, str] = {}
+            failed_ids = set()
+
+            for date_str in window_dates:
+                news_data = self.storage_manager.get_today_all_data(date_str)
+                if not news_data:
+                    continue
+
+                failed_ids.update(news_data.failed_ids)
+                for source_id, source_name in news_data.id_to_name.items():
+                    if current_platform_ids is not None and source_id not in current_platform_ids:
+                        continue
+                    id_to_name[source_id] = source_name
+
+                if not hasattr(backend, "_get_connection"):
+                    raise RuntimeError("当前存储后端不支持过去24小时精确统计")
+
+                conn = backend._get_connection(date_str)
+                cursor = conn.cursor()
+                cursor.execute(
+                    """
+                    SELECT n.platform_id, p.name, n.title, n.url, n.mobile_url,
+                           rh.rank, rh.crawl_time
+                    FROM news_items n
+                    JOIN platforms p ON p.id = n.platform_id
+                    JOIN rank_history rh ON rh.news_item_id = n.id
+                    WHERE rh.rank > 0
+                    ORDER BY n.platform_id, n.title, rh.crawl_time
+                    """
+                )
+
+                for row in cursor.fetchall():
+                    source_id = row[0]
+                    if current_platform_ids is not None and source_id not in current_platform_ids:
+                        continue
+
+                    rank_dt = self._parse_local_datetime(date_str, row[6])
+                    if not rank_dt or rank_dt < cutoff or rank_dt > now:
+                        continue
+
+                    source_name = row[1] or source_id
+                    title = row[2]
+                    url = row[3] or ""
+                    mobile_url = row[4] or ""
+                    rank = row[5]
+
+                    id_to_name[source_id] = source_name
+                    merged_items.setdefault(source_id, {})
+
+                    title_bucket = merged_items[source_id].get(title)
+                    if title_bucket is None:
+                        merged_items[source_id][title] = {
+                            "title": title,
+                            "url": url,
+                            "mobileUrl": mobile_url,
+                            "ranks": [rank],
+                            "count": 1,
+                            "_first_dt": rank_dt,
+                            "_last_dt": rank_dt,
+                        }
+                        continue
+
+                    if rank_dt < title_bucket["_first_dt"]:
+                        title_bucket["_first_dt"] = rank_dt
+                    if rank_dt > title_bucket["_last_dt"]:
+                        title_bucket["_last_dt"] = rank_dt
+                        if url:
+                            title_bucket["url"] = url
+                        if mobile_url:
+                            title_bucket["mobileUrl"] = mobile_url
+
+                    if rank not in title_bucket["ranks"]:
+                        title_bucket["ranks"].append(rank)
+                    title_bucket["count"] += 1
+
+            if not merged_items:
+                if not quiet:
+                    print(f"过去{hours}小时内没有可用热榜数据")
+                return None
+
+            all_results: Dict[str, Dict[str, Dict]] = {}
+            title_info: Dict[str, Dict[str, Dict]] = {}
+
+            for source_id, titles in merged_items.items():
+                all_results[source_id] = {}
+                title_info[source_id] = {}
+                for title, meta in titles.items():
+                    all_results[source_id][title] = {
+                        "ranks": meta["ranks"],
+                        "url": meta["url"],
+                        "mobileUrl": meta["mobileUrl"],
+                    }
+                    title_info[source_id][title] = {
+                        "first_time": self._format_window_time(meta["_first_dt"]),
+                        "last_time": self._format_window_time(meta["_last_dt"]),
+                        "count": meta["count"],
+                        "ranks": meta["ranks"],
+                        "url": meta["url"],
+                        "mobileUrl": meta["mobileUrl"],
+                        "rank_timeline": [],
+                    }
+
+            word_groups, filter_words, global_filters = self.ctx.load_frequency_words(self.frequency_file)
+
+            if not quiet:
+                total_titles = sum(len(titles) for titles in all_results.values())
+                print(f"过去{hours}小时热榜汇总：{total_titles} 条候选新闻")
+
+            return (
+                all_results,
+                id_to_name,
+                title_info,
+                {},
+                word_groups,
+                filter_words,
+                global_filters,
+            )
+        except Exception as e:
+            print(f"过去24小时热榜数据加载失败: {e}")
+            return None
+
+    def _load_rolling_rss_data(
+        self,
+        hours: int = 24,
+    ) -> Tuple[Optional[List[Dict]], Optional[List[Dict]], Optional[List[Dict]], set]:
+        """加载过去 N 小时的 RSS 数据。"""
+        try:
+            from trendradar.core.analyzer import count_rss_frequency
+
+            now = self.ctx.get_time()
+            cutoff = now - timedelta(hours=hours)
+            window_dates = sorted({cutoff.strftime("%Y-%m-%d"), now.strftime("%Y-%m-%d")})
+
+            word_groups, filter_words, global_filters = self.ctx.load_frequency_words(self.frequency_file)
+            timezone_name = self.ctx.timezone
+            max_news_per_keyword = self.ctx.config.get("MAX_NEWS_PER_KEYWORD", 0)
+            sort_by_position_first = self.ctx.config.get("SORT_BY_POSITION_FIRST", False)
+
+            seen = set()
+            rss_items: List[Dict] = []
+
+            for date_str in window_dates:
+                rss_data = self.storage_manager.get_rss_data(date_str)
+                if not rss_data or not rss_data.items:
+                    continue
+
+                for feed_id, items in rss_data.items.items():
+                    feed_name = rss_data.id_to_name.get(feed_id, feed_id)
+                    for item in items:
+                        published_dt = None
+                        if item.published_at:
+                            try:
+                                published_dt = datetime.fromisoformat(item.published_at.replace("Z", "+00:00"))
+                                if published_dt.tzinfo is None:
+                                    published_dt = pytz.timezone(timezone_name).localize(published_dt)
+                                else:
+                                    published_dt = published_dt.astimezone(pytz.timezone(timezone_name))
+                            except Exception:
+                                published_dt = None
+
+                        if published_dt is None:
+                            published_dt = self._parse_local_datetime(rss_data.date, item.last_time or item.crawl_time)
+
+                        if not published_dt or published_dt < cutoff:
+                            continue
+
+                        dedupe_key = item.url or f"{feed_id}:{item.title}"
+                        if dedupe_key in seen:
+                            continue
+                        seen.add(dedupe_key)
+
+                        rss_items.append({
+                            "title": item.title,
+                            "feed_id": feed_id,
+                            "feed_name": feed_name,
+                            "url": item.url,
+                            "published_at": item.published_at,
+                            "summary": item.summary,
+                            "author": item.author,
+                            "_sort_dt": published_dt,
+                        })
+
+            if not rss_items:
+                print(f"[RSS] 过去{hours}小时内没有可用数据")
+                return None, None, None, set()
+
+            rss_items.sort(key=lambda x: x["_sort_dt"], reverse=True)
+            for item in rss_items:
+                item.pop("_sort_dt", None)
+
+            rss_stats, _ = count_rss_frequency(
+                rss_items=rss_items,
+                word_groups=word_groups,
+                filter_words=filter_words,
+                global_filters=global_filters,
+                new_items=None,
+                max_news_per_keyword=max_news_per_keyword,
+                sort_by_position_first=sort_by_position_first,
+                timezone=timezone_name,
+                rank_threshold=self.rank_threshold,
+                quiet=False,
+            )
+
+            return rss_stats, None, rss_items, set()
+        except Exception as e:
+            print(f"[RSS] 过去24小时数据加载失败: {e}")
+            return None, None, None, set()
 
     def _prepare_current_title_info(self, results: Dict, time_info: str) -> Dict:
         """从当前抓取结果构建标题信息"""
@@ -1626,6 +1887,49 @@ class NewsAnalyzer:
                     schedule=schedule,
                     rss_new_urls=rss_new_urls,
                 )
+        elif self.report_mode == "rolling_24h":
+            analysis_data = self._load_rolling_analysis_data()
+            rss_items, rss_new_items, raw_rss_items, rss_new_urls = self._load_rolling_rss_data()
+            new_titles = {}
+
+            if analysis_data:
+                (
+                    all_results,
+                    historical_id_to_name,
+                    historical_title_info,
+                    historical_new_titles,
+                    _,
+                    _,
+                    _,
+                ) = analysis_data
+
+                standalone_data = self._prepare_standalone_data(
+                    all_results, historical_id_to_name, historical_title_info, raw_rss_items
+                )
+
+                stats, html_file, ai_result, rss_items = self._run_analysis_pipeline(
+                    all_results,
+                    self.report_mode,
+                    historical_title_info,
+                    historical_new_titles,
+                    word_groups,
+                    filter_words,
+                    historical_id_to_name,
+                    failed_ids=failed_ids,
+                    global_filters=global_filters,
+                    rss_items=rss_items,
+                    rss_new_items=rss_new_items,
+                    standalone_data=standalone_data,
+                    schedule=schedule,
+                    rss_new_urls=rss_new_urls,
+                )
+
+                id_to_name = historical_id_to_name
+                title_info = historical_title_info
+                results = all_results
+            else:
+                print("❌ 过去24小时模式缺少可用热榜数据")
+                return None
         else:
             # incremental 模式：只使用当前抓取的数据
             title_info = self._prepare_current_title_info(results, time_info)

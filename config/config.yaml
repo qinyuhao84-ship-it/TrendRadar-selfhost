@@ -139,7 +139,7 @@ rss:
 # 4. 报告模式
 #
 # 新手 5 行：
-# 1) 先选 mode：daily(当日汇总) / current(当前榜单) / incremental(仅新增)
+# 1) 先选 mode：daily(当日汇总) / current(当前榜单) / incremental(仅新增) / rolling_24h(过去24小时)
 # 2) 再选 display_mode：keyword(按词/标签) / platform(按平台)
 # 3) 如果你开了 schedule，这里的 mode 只是默认值，会被 timeline 时段覆盖
 # 4) sort_by_position_first 只影响 keyword 模式排序
@@ -149,9 +149,10 @@ rss:
 # - daily：信息最全，但重复最多
 # - current：适合盯当前热度
 # - incremental：最少打扰，只看新增
+# - rolling_24h：适合早报，汇总过去24小时内真正上过热榜的内容
 # ===============================================================
 report:
-  mode: "current"                     # daily | current | incremental（schedule 开启时作为默认值）
+  mode: "current"                     # daily | current | incremental | rolling_24h（schedule 开启时作为默认值）
 
   display_mode: "keyword"             # 分组维度: keyword | platform
                                       # keyword: 按关键词分组显示（默认）
